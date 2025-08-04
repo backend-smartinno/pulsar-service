@@ -1,58 +1,143 @@
-#!/bin/bash
+services:
 
-# Exit on error
-set -e
+  zookeeper:
+    image: apachepulsar/pulsar:latest
+    container_name: zookeeper
+    restart: on-failure
+    networks:
+      - pulsar
+    volumes:
+      - ./data/zookeeper:/pulsar/data/zookeeper
+    environment:
+      - metadataStoreUrl=zk:zookeeper:2181
+      - PULSAR_MEM=-Xms256m -Xmx256m -XX:MaxDirectMemorySize=256m
+    command:
+      - bash
+      - -c
+      - |
+        bin/apply-config-from-env.py conf/zookeeper.conf && \
+        bin/generate-zookeeper-config.sh conf/zookeeper.conf && \
+        exec bin/pulsar zookeeper
+    healthcheck:
+      test: ["CMD", "bin/pulsar-zookeeper-ruok.sh"]
+      interval: 10s
+      timeout: 5s
+      retries: 30
+    deploy:
+      resources:
+        limits:
+          memory: 512M
+          cpus: '0.5'
+        reservations:
+          memory: 256M
+          cpus: '0.25'
 
-echo "Checking for and removing old Docker versions..."
-for pkg in docker.io docker-doc docker-compose docker-compose-v2 podman-docker containerd runc; do
-  sudo apt-get remove -y $pkg 2>/dev/null || true
-done
+  pulsar-init:
+    image: apachepulsar/pulsar:latest
+    container_name: pulsar-init
+    hostname: pulsar-init
+    restart: on-failure
+    networks:
+      - pulsar
+    environment:
+      PULSAR_MEM: -Xms256m -Xmx512m
+    deploy:
+      resources:
+        limits:
+          memory: 1G
+          cpus: '0.5'
+    command: |
+      bash -c "
+        echo 'Initializing Pulsar cluster metadata...'
+        bin/pulsar initialize-cluster-metadata 
+        --cluster cluster-a 
+        --zookeeper zookeeper:2181 
+        --configuration-store zookeeper:2181 
+        --web-service-url http://broker:8080 
+        --broker-service-url pulsar://broker:6650
+        echo 'Cluster initialization completed!'
+      "
+    depends_on:
+      zookeeper:
+        condition: service_healthy
 
-echo "Updating package list..."
-sudo apt-get update
+  bookie:
+    image: apachepulsar/pulsar:latest
+    container_name: bookie
+    restart: on-failure
+    networks:
+      - pulsar
+    environment:
+      clusterName: cluster-a
+      zkServers: zookeeper:2181
+      metadataServiceUri: metadata-store:zk:zookeeper:2181
+      advertisedAddress: bookie
+      BOOKIE_MEM: -Xms512m -Xmx512m -XX:MaxDirectMemorySize=256m
+    volumes:
+      - bookie-data:/pulsar/data/bookkeeper
+    deploy:
+      resources:
+        limits:
+          memory: 1G
+          cpus: '1.0'
+        reservations:
+          memory: 512M
+          cpus: '0.5'
+    depends_on:
+      zookeeper:
+        condition: service_healthy
+      pulsar-init:
+        condition: service_completed_successfully
+    command: bash -c "bin/apply-config-from-env.py conf/bookkeeper.conf && exec bin/pulsar bookie"
 
-echo "Installing required dependencies..."
-sudo apt-get install -y ca-certificates curl
+  broker:
+    image: apachepulsar/pulsar:latest
+    container_name: broker
+    hostname: broker
+    restart: on-failure
+    networks:
+      - pulsar
+    environment:
+      metadataStoreUrl: zk:zookeeper:2181
+      zookeeperServers: zookeeper:2181
+      clusterName: cluster-a
+      managedLedgerDefaultEnsembleSize: 1
+      managedLedgerDefaultWriteQuorum: 1
+      managedLedgerDefaultAckQuorum: 1
+      advertisedAddress: broker
+      advertisedListeners: external:pulsar://broker:6650
+      PULSAR_MEM: -Xms512m -Xmx512m -XX:MaxDirectMemorySize=256m
+    ports:
+      - "6650:6650"
+      - "8080:8080"
+    volumes:
+      - broker-data:/pulsar/data
+    deploy:
+      resources:
+        limits:
+          memory: 1G
+          cpus: '1.0'
+        reservations:
+          memory: 512M
+          cpus: '0.5'
+    depends_on:
+      zookeeper:
+        condition: service_healthy
+      bookie:
+        condition: service_started
+    command: bash -c "bin/apply-config-from-env.py conf/broker.conf && exec bin/pulsar broker"
+    healthcheck:
+      test: ["CMD-SHELL", "curl -f http://localhost:8080/admin/v2/brokers/health || exit 1"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 60s
 
-# Download and add Docker's official GPG key:
-echo "Adding Docker GPG key..."
-sudo install -m 0755 -d /etc/apt/keyrings
-sudo curl -fsSL https://download.docker.com/linux/ubuntu/gpg -o /etc/apt/keyrings/docker.asc
-sudo chmod a+r /etc/apt/keyrings/docker.asc
+networks:
+  pulsar:
+    driver: bridge
 
-# Add the repository to Apt sources:
-echo \
-  "deb [arch=$(dpkg --print-architecture) signed-by=/etc/apt/keyrings/docker.asc] https://download.docker.com/linux/ubuntu \
-  $(. /etc/os-release && echo "${UBUNTU_CODENAME:-$VERSION_CODENAME}") stable" | \
-  sudo tee /etc/apt/sources.list.d/docker.list > /dev/null
-sudo apt-get update
-
-echo "Installing Docker Engine, CLI, and containerd..."
-sudo apt-get install docker-ce docker-ce-cli containerd.io docker-buildx-plugin docker-compose-plugin -y
-
-echo "Adding current user to the Docker group..."
-# Create the docker group if it doesn't exist
-sudo groupadd docker 2>/dev/null || echo "docker group already exists"
-sudo usermod -aG docker $USER
-
-# Fix permissions if ~/.docker directory exists
-if [ -d "$HOME/.docker" ]; then
-  echo "Fixing Docker directory permissions..."
-  sudo chown "$USER":"$USER" "$HOME/.docker" -R
-  sudo chmod g+rwx "$HOME/.docker" -R
-fi
-
-echo "Starting and enabling Docker service..."
-sudo systemctl enable docker.service
-sudo systemctl enable containerd.service
-sudo systemctl start docker.service
-
-echo "Verifying Docker installation..."
-docker run --rm hello-world || {
-  echo "Docker test failed. You may need to log out and back in for group changes to take effect."
-  echo "Alternatively, you can run: newgrp docker"
-}
-
-echo "Installation complete! Run 'docker --version' to check the installation."
-echo "NOTE: You may need to log out and log back in for user group changes to take effect."
-echo "If you don't want to log out now, you can run 'newgrp docker' to activate changes for this session."
+volumes:
+  zookeeper-data:
+  bookie-data:
+  broker-data:
