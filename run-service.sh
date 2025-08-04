@@ -7,6 +7,51 @@ echo "Current directory: $(pwd)"
 echo "Date: $(date)"
 echo ""
 
+# Function to get host IP address
+get_host_ip() {
+    local ip=""
+    
+    # Try to get hostname IP first (works on most systems)
+    if command -v hostname >/dev/null 2>&1; then
+        ip=$(hostname -I 2>/dev/null | awk '{print $1}')
+    fi
+    
+    # If hostname failed, try ip command (Linux)
+    if [[ -z "$ip" ]] && command -v ip >/dev/null 2>&1; then
+        ip=$(ip route get 8.8.8.8 2>/dev/null | grep -oP 'src \K\S+' | head -n1)
+    fi
+    
+    # If still no IP, try ifconfig (macOS/Linux)
+    if [[ -z "$ip" ]] && command -v ifconfig >/dev/null 2>&1; then
+        ip=$(ifconfig | grep -E "inet ([0-9]{1,3}\.){3}[0-9]{1,3}" | grep -v 127.0.0.1 | awk '{print $2}' | head -n1)
+    fi
+    
+    # If still no IP, try ipconfig (Windows)
+    if [[ -z "$ip" ]] && command -v ipconfig >/dev/null 2>&1; then
+        ip=$(ipconfig | grep -E "IPv4.*: ([0-9]{1,3}\.){3}[0-9]{1,3}" | head -n1 | grep -oE "([0-9]{1,3}\.){3}[0-9]{1,3}")
+    fi
+    
+    # Fallback to localhost if no IP found
+    if [[ -z "$ip" ]]; then
+        ip="localhost"
+        echo "Warning: Could not detect IP address, using localhost"
+    fi
+    
+    echo "$ip"
+}
+
+# Function to get public IP address
+get_public_ip() {
+    local public_ip=""
+    
+    # Try multiple public IP services
+    public_ip=$(curl -s --connect-timeout 5 ifconfig.me 2>/dev/null) || 
+    public_ip=$(curl -s --connect-timeout 5 ipinfo.io/ip 2>/dev/null) || 
+    public_ip=$(curl -s --connect-timeout 5 api.ipify.org 2>/dev/null)
+    
+    echo "$public_ip"
+}
+
 # Function to create directory if it doesn't exist
 create_directory() {
     local dir_path="$1"
@@ -54,7 +99,56 @@ create_directory "data/bookkeeper"
 create_directory "logs"
 
 echo ""
-echo "2. Checking Docker and Docker Compose..."
+echo "2. Detecting and configuring IP address..."
+
+# Get both private and public IPs
+PRIVATE_IP=$(get_host_ip)
+PUBLIC_IP=$(get_public_ip)
+
+echo "Detected Private IP: $PRIVATE_IP"
+if [ -n "$PUBLIC_IP" ]; then
+    echo "Detected Public IP: $PUBLIC_IP"
+else
+    echo "Could not detect Public IP (check internet connection)"
+fi
+
+# Check if .env file exists and has USE_PUBLIC_IP setting
+USE_PUBLIC_IP=""
+if [ -f ".env" ]; then
+    USE_PUBLIC_IP=$(grep "^USE_PUBLIC_IP=" .env 2>/dev/null | cut -d'=' -f2)
+fi
+
+# Determine which IP to use
+if [ "$USE_PUBLIC_IP" = "true" ] && [ -n "$PUBLIC_IP" ]; then
+    SELECTED_IP="$PUBLIC_IP"
+    echo "Using Public IP for external access: $SELECTED_IP"
+elif [ "$USE_PUBLIC_IP" = "true" ] && [ -z "$PUBLIC_IP" ]; then
+    SELECTED_IP="$PRIVATE_IP"
+    echo "⚠️  Public IP requested but not available, using Private IP: $SELECTED_IP"
+else
+    SELECTED_IP="$PRIVATE_IP"
+    echo "Using Private IP for local/internal access: $SELECTED_IP"
+fi
+
+echo ""
+echo "💡 IP Configuration Tips:"
+echo "   - Current: $SELECTED_IP"
+echo "   - For local development: use Private IP ($PRIVATE_IP)"
+if [ -n "$PUBLIC_IP" ]; then
+    echo "   - For external access: set USE_PUBLIC_IP=true in .env to use Public IP ($PUBLIC_IP)"
+    echo "   - Note: Public IP requires proper firewall/security group configuration"
+fi
+
+# Create or update .env file
+echo "PULSAR_BROKER_IP=$SELECTED_IP" > .env
+echo "PULSAR_CLUSTER_NAME=cluster-a" >> .env
+echo "USE_PUBLIC_IP=${USE_PUBLIC_IP:-false}" >> .env
+echo "# Set USE_PUBLIC_IP=true to use public IP for external access" >> .env
+echo "# Warning: Ensure firewall allows ports 6650, 8080, 9527 for public access" >> .env
+echo "✓ Updated .env file with PULSAR_BROKER_IP=$SELECTED_IP"
+
+echo ""
+echo "3. Checking Docker and Docker Compose..."
 
 # Check if Docker is running
 if ! docker info >/dev/null 2>&1; then
@@ -82,22 +176,22 @@ echo "✓ Docker Compose is available"
 export $(grep -v '^#' .env | xargs)
 
 echo ""
-echo "3. Cleaning up any existing containers..."
+echo "4. Cleaning up any existing containers..."
 $DOCKER_COMPOSE_CMD down --remove-orphans 2>/dev/null || true
 
 echo ""
-echo "4. Pulling latest images..."
+echo "5. Pulling latest images..."
 $DOCKER_COMPOSE_CMD pull
 
 echo ""
-echo "5. Starting Apache Pulsar services..."
+echo "6. Starting Apache Pulsar services..."
 echo "This may take a few minutes for the first startup..."
 
 # Start services with proper logging
 $DOCKER_COMPOSE_CMD up -d
 
 echo ""
-echo "6. Waiting for services to be healthy..."
+echo "7. Waiting for services to be healthy..."
 
 # Function to check service health
 check_service_health() {
@@ -139,12 +233,12 @@ fi
 sleep 10
 
 echo ""
-echo "7. Service Status:"
+echo "8. Service Status:"
 echo "===================="
 $DOCKER_COMPOSE_CMD ps
 
 echo ""
-echo "8. Service URLs:"
+echo "9. Service URLs:"
 echo "===================="
 echo "Pulsar Broker:          http://$HOST_IP:8080"
 echo "Pulsar Admin REST API:  http://$HOST_IP:8080/admin/v2"
