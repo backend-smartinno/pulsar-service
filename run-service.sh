@@ -13,22 +13,32 @@ create_directory() {
     if [ ! -d "$dir_path" ]; then
         echo "Creating directory: $dir_path"
         mkdir -p "$dir_path"
-        
-        # Set proper permissions for the directories
-        # ZooKeeper and BookKeeper typically run as user 10000 in the container
-        if command -v chown >/dev/null 2>&1; then
-            chown -R 10000:10000 "$dir_path" 2>/dev/null || {
-                echo "Warning: Could not set ownership for $dir_path (this might be normal on Windows)"
-            }
-        fi
-        
-        chmod -R 755 "$dir_path" 2>/dev/null || {
-            echo "Warning: Could not set permissions for $dir_path (this might be normal on Windows)"
-        }
-        
         echo "✓ Directory created: $dir_path"
     else
         echo "✓ Directory already exists: $dir_path"
+    fi
+    
+    # Create specific subdirectories for ZooKeeper and BookKeeper
+    if [[ "$dir_path" == *"zookeeper"* ]]; then
+        mkdir -p "$dir_path/version-2"
+        echo "✓ Created ZooKeeper version-2 subdirectory"
+    fi
+    
+    # Set proper permissions (this will work on Linux/macOS, harmless on Windows)
+    if command -v chmod >/dev/null 2>&1; then
+        chmod -R 755 "$dir_path" 2>/dev/null || {
+            echo "Warning: Could not set permissions for $dir_path (this might be normal on Windows)"
+        }
+    fi
+    
+    # Try to set ownership (this will work on Linux, might fail on Windows/macOS)
+    if command -v chown >/dev/null 2>&1; then
+        # Try different user IDs that Pulsar containers might use
+        chown -R 10000:10000 "$dir_path" 2>/dev/null || \
+        chown -R 1000:1000 "$dir_path" 2>/dev/null || \
+        chown -R $(id -u):$(id -g) "$dir_path" 2>/dev/null || {
+            echo "Warning: Could not set ownership for $dir_path (this might be normal on Windows)"
+        }
     fi
 }
 
