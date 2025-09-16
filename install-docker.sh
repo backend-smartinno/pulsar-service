@@ -1,54 +1,35 @@
 #!/bin/bash
 
-set -e  # Exit on any error
+# Exit on error
+set -e
 
-echo "=== Docker Installation Script for Windows ==="
-echo "This script will help you install Docker Desktop on Windows"
-echo ""
+echo "Updating package list..."
+sudo apt-get update
 
-# Check if running on Windows
-if [[ "$OSTYPE" != "msys" && "$OSTYPE" != "cygwin" && "$OSTYPE" != "win32" ]]; then
-    echo "❌ This script is designed for Windows. For other operating systems, please refer to Docker's official documentation."
-    exit 1
-fi
+# Add Docker's official GPG key:
+sudo apt-get update
+sudo apt-get install ca-certificates curl
+sudo install -m 0755 -d /etc/apt/keyrings
+sudo curl -fsSL https://download.docker.com/linux/ubuntu/gpg -o /etc/apt/keyrings/docker.asc
+sudo chmod a+r /etc/apt/keyrings/docker.asc
 
-# Check if Docker is already installed
-if command -v docker >/dev/null 2>&1; then
-    echo "✓ Docker is already installed:"
-    docker --version
-    
-    if docker info >/dev/null 2>&1; then
-        echo "✓ Docker is running"
-    else
-        echo "⚠️  Docker is installed but not running. Please start Docker Desktop."
-    fi
-    
-    echo ""
-    echo "To run the Pulsar service, execute:"
-    echo "  ./run-service.sh"
-    exit 0
-fi
+# Add the repository to Apt sources:
+echo \
+  "deb [arch=$(dpkg --print-architecture) signed-by=/etc/apt/keyrings/docker.asc] https://download.docker.com/linux/ubuntu \
+  $(. /etc/os-release && echo "${UBUNTU_CODENAME:-$VERSION_CODENAME}") stable" | \
+  sudo tee /etc/apt/sources.list.d/docker.list > /dev/null
+sudo apt-get update
 
-echo "Docker is not installed. Please follow these steps to install Docker Desktop:"
-echo ""
-echo "1. Download Docker Desktop for Windows:"
-echo "   https://desktop.docker.com/win/stable/Docker%20Desktop%20Installer.exe"
-echo ""
-echo "2. Run the installer and follow the installation wizard"
-echo ""
-echo "3. After installation, restart your computer if prompted"
-echo ""
-echo "4. Start Docker Desktop from the Start menu"
-echo ""
-echo "5. Wait for Docker to start (you'll see the Docker whale icon in the system tray)"
-echo ""
-echo "6. Open a new terminal and run this script again to verify the installation"
-echo ""
-echo "System Requirements:"
-echo "- Windows 10 64-bit: Pro, Enterprise, or Education (Build 15063 or later)"
-echo "- Windows 11 64-bit: Home or Pro version 21H2 or higher"
-echo "- WSL 2 feature enabled"
-echo "- Virtualization enabled in BIOS"
-echo ""
-echo "For manual installation steps, visit:"
-echo "https://docs.docker.com/desktop/install/windows-install/"
+sudo apt-get install docker-ce docker-ce-cli containerd.io docker-buildx-plugin docker-compose-plugin
+
+echo "Adding current user to the Docker group (log out and back in for this to take effect)..."
+sudo groupadd docker
+sudo usermod -aG docker $USER
+newgrp docker
+
+echo "Starting and enabling Docker service..."
+sudo systemctl enable docker.service
+sudo systemctl enable containerd.service
+
+echo "Installation complete! Run 'docker --version' to check the installation."
+echo "You may need to restart your system for group changes to take effect."
