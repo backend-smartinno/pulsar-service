@@ -7,7 +7,7 @@ echo "Current directory: $(pwd)"
 echo "Date: $(date)"
 echo ""
 
-# Function to get host IP address
+# Function to get host IP address (private/internal)
 get_host_ip() {
     local ip=""
     
@@ -44,17 +44,23 @@ get_host_ip() {
 get_public_ip() {
     local public_ip=""
     
-    # Try multiple public IP services
-    public_ip=$(curl -s --connect-timeout 5 ifconfig.me 2>/dev/null) || 
-    public_ip=$(curl -s --connect-timeout 5 ipinfo.io/ip 2>/dev/null) || 
-    public_ip=$(curl -s --connect-timeout 5 api.ipify.org 2>/dev/null)
+    echo "Detecting public IP address..."
+    # Try multiple public IP services with longer timeout
+    public_ip=$(curl -s --connect-timeout 10 --max-time 15 ifconfig.me 2>/dev/null) || 
+    public_ip=$(curl -s --connect-timeout 10 --max-time 15 ipinfo.io/ip 2>/dev/null) || 
+    public_ip=$(curl -s --connect-timeout 10 --max-time 15 api.ipify.org 2>/dev/null) ||
+    public_ip=$(curl -s --connect-timeout 10 --max-time 15 icanhazip.com 2>/dev/null)
+    
+    # Remove any whitespace
+    public_ip=$(echo "$public_ip" | tr -d '[:space:]')
     
     echo "$public_ip"
 }
 
-# Function to create directory if it doesn't exist
+# Function to create directory if it doesn't exist with proper permissions
 create_directory() {
     local dir_path="$1"
+    
     if [ ! -d "$dir_path" ]; then
         echo "Creating directory: $dir_path"
         mkdir -p "$dir_path"
@@ -64,87 +70,115 @@ create_directory() {
     fi
     
     # Create specific subdirectories for ZooKeeper and BookKeeper
-    if [[ "$dir_path" == *"zookeeper"* ]]; then
+    if [[ "$dir_path" == "zookeeper" ]]; then
         mkdir -p "$dir_path/version-2"
         echo "✓ Created ZooKeeper version-2 subdirectory"
     fi
     
-    # Set proper permissions (this will work on Linux/macOS, harmless on Windows)
+    # Set comprehensive permissions for all users (777) to avoid permission issues
     if command -v chmod >/dev/null 2>&1; then
-        chmod -R 755 "$dir_path" 2>/dev/null || {
-            echo "Warning: Could not set permissions for $dir_path (this might be normal on Windows)"
+        chmod -R 777 "$dir_path" 2>/dev/null || {
+            echo "Warning: Could not set permissions for $dir_path"
         }
+        echo "✓ Set permissions (777) for $dir_path"
     fi
     
-    # Try to set ownership (this will work on Linux, might fail on Windows/macOS)
+    # Try to set ownership with various common user IDs
     if command -v chown >/dev/null 2>&1; then
         # Try different user IDs that Pulsar containers might use
         chown -R 10000:10000 "$dir_path" 2>/dev/null || \
         chown -R 1000:1000 "$dir_path" 2>/dev/null || \
+        chown -R 999:999 "$dir_path" 2>/dev/null || \
         chown -R $(id -u):$(id -g) "$dir_path" 2>/dev/null || {
             echo "Warning: Could not set ownership for $dir_path (this might be normal on Windows)"
         }
     fi
 }
 
-echo "1. Creating required data directories..."
+echo "1. Creating required data directories with proper permissions..."
 
-# Create ZooKeeper data directory
+# Create directories with comprehensive permissions
+create_directory "data"
 create_directory "data/zookeeper"
-
-# Create BookKeeper data directory
 create_directory "data/bookkeeper"
-
-# Create logs directory (optional, for better organization)
 create_directory "logs"
 
 echo ""
-echo "2. Detecting and configuring IP address..."
+echo "2. Detecting and configuring IP addresses..."
 
 # Get both private and public IPs
 PRIVATE_IP=$(get_host_ip)
-PUBLIC_IP=$(get_public_ip)
-
 echo "Detected Private IP: $PRIVATE_IP"
-if [ -n "$PUBLIC_IP" ]; then
+
+PUBLIC_IP=$(get_public_ip)
+if [ -n "$PUBLIC_IP" ] && [[ "$PUBLIC_IP" =~ ^[0-9]{1,3}\.[0-9]{1,3}\.[0-9]{1,3}\.[0-9]{1,3}$ ]]; then
     echo "Detected Public IP: $PUBLIC_IP"
 else
-    echo "Could not detect Public IP (check internet connection)"
+    echo "Could not detect Public IP (using private IP as fallback)"
+    PUBLIC_IP=""
 fi
 
-# Check if .env file exists and has USE_PUBLIC_IP setting
-USE_PUBLIC_IP=""
+# Check existing .env file for manual configuration
+EXISTING_BROKER_IP=""
+EXISTING_USE_PUBLIC_IP=""
 if [ -f ".env" ]; then
-    USE_PUBLIC_IP=$(grep "^USE_PUBLIC_IP=" .env 2>/dev/null | cut -d'=' -f2)
+    EXISTING_BROKER_IP=$(grep "^PULSAR_BROKER_IP=" .env 2>/dev/null | cut -d'=' -f2)
+    EXISTING_USE_PUBLIC_IP=$(grep "^USE_PUBLIC_IP=" .env 2>/dev/null | cut -d'=' -f2)
+    
+    # Check if there's a manually configured IP that's different from detected ones
+    if [ -n "$EXISTING_BROKER_IP" ] && [ "$EXISTING_BROKER_IP" != "$PRIVATE_IP" ] && [ "$EXISTING_BROKER_IP" != "$PUBLIC_IP" ]; then
+        echo "Found manually configured IP in .env: $EXISTING_BROKER_IP"
+        echo "Do you want to keep this manual configuration? (y/n)"
+        read -p "Enter choice [y]: " keep_manual
+        keep_manual=${keep_manual:-y}
+        
+        if [[ "$keep_manual" =~ ^[Yy]$ ]]; then
+            SELECTED_IP="$EXISTING_BROKER_IP"
+            USE_PUBLIC_IP="$EXISTING_USE_PUBLIC_IP"
+            echo "✓ Using manually configured IP: $SELECTED_IP"
+        else
+            EXISTING_BROKER_IP=""
+        fi
+    fi
 fi
 
-# Determine which IP to use
-if [ "$USE_PUBLIC_IP" = "true" ] && [ -n "$PUBLIC_IP" ]; then
-    SELECTED_IP="$PUBLIC_IP"
-    echo "Using Public IP for external access: $SELECTED_IP"
-elif [ "$USE_PUBLIC_IP" = "true" ] && [ -z "$PUBLIC_IP" ]; then
-    SELECTED_IP="$PRIVATE_IP"
-    echo "⚠️  Public IP requested but not available, using Private IP: $SELECTED_IP"
-else
-    SELECTED_IP="$PRIVATE_IP"
-    echo "Using Private IP for local/internal access: $SELECTED_IP"
+# If no manual configuration or user chose not to keep it, determine IP automatically
+if [ -z "$EXISTING_BROKER_IP" ] || [[ ! "$keep_manual" =~ ^[Yy]$ ]]; then
+    # Default to public IP if available, otherwise use private IP
+    if [ -n "$PUBLIC_IP" ]; then
+        SELECTED_IP="$PUBLIC_IP"
+        USE_PUBLIC_IP="true"
+        echo "✓ Using Public IP for external access: $SELECTED_IP"
+    else
+        SELECTED_IP="$PRIVATE_IP"
+        USE_PUBLIC_IP="false"
+        echo "✓ Using Private IP for local access: $SELECTED_IP"
+    fi
 fi
 
 echo ""
-echo "💡 IP Configuration Tips:"
-echo "   - Current: $SELECTED_IP"
-echo "   - For local development: use Private IP ($PRIVATE_IP)"
+echo "💡 IP Configuration Summary:"
+echo "   - Selected IP: $SELECTED_IP"
+echo "   - Private IP: $PRIVATE_IP"
 if [ -n "$PUBLIC_IP" ]; then
-    echo "   - For external access: set USE_PUBLIC_IP=true in .env to use Public IP ($PUBLIC_IP)"
-    echo "   - Note: Public IP requires proper firewall/security group configuration"
+    echo "   - Public IP: $PUBLIC_IP"
+    echo "   - Public IP access requires firewall configuration for ports: 6650, 8080, 9527"
 fi
+echo "   - Use Public IP: $USE_PUBLIC_IP"
 
-# Create or update .env file
+# Create or update .env file with proper permissions
 echo "PULSAR_BROKER_IP=$SELECTED_IP" > .env
 echo "PULSAR_CLUSTER_NAME=cluster-a" >> .env
-echo "USE_PUBLIC_IP=${USE_PUBLIC_IP:-false}" >> .env
-echo "# Set USE_PUBLIC_IP=true to use public IP for external access" >> .env
-echo "# Warning: Ensure firewall allows ports 6650, 8080, 9527 for public access" >> .env
+echo "USE_PUBLIC_IP=$USE_PUBLIC_IP" >> .env
+echo "PULSAR_MANAGER_PASSWORD=admin123" >> .env
+echo "# Pulsar Configuration" >> .env
+echo "# PULSAR_BROKER_IP: IP address that clients will use to connect" >> .env
+echo "# USE_PUBLIC_IP: Set to 'true' for external access, 'false' for local" >> .env
+echo "# Public IP requires firewall configuration for ports 6650, 8080, 9527" >> .env
+
+# Set proper permissions for .env file
+chmod 644 .env 2>/dev/null || true
+
 echo "✓ Updated .env file with PULSAR_BROKER_IP=$SELECTED_IP"
 
 echo ""
@@ -172,12 +206,14 @@ fi
 
 echo "✓ Docker Compose is available"
 
-# Export env file for docker compose
-export $(grep -v '^#' .env | xargs)
+# Export environment variables for docker compose
+set -a  # automatically export all variables
+source .env
+set +a  # stop automatically exporting
 
 echo ""
 echo "4. Cleaning up any existing containers..."
-$DOCKER_COMPOSE_CMD down --remove-orphans 2>/dev/null || true
+$DOCKER_COMPOSE_CMD down --remove-orphans --volumes 2>/dev/null || true
 
 echo ""
 echo "5. Pulling latest images..."
@@ -240,24 +276,31 @@ $DOCKER_COMPOSE_CMD ps
 echo ""
 echo "9. Service URLs:"
 echo "===================="
-echo "Pulsar Broker:          http://$HOST_IP:8080"
-echo "Pulsar Admin REST API:  http://$HOST_IP:8080/admin/v2"
-echo "Pulsar Manager:         http://$HOST_IP:9527"
-echo "Pulsar Service URL:     pulsar://$HOST_IP:6650"
+echo "Pulsar Broker:          http://$SELECTED_IP:8080"
+echo "Pulsar Admin REST API:  http://$SELECTED_IP:8080/admin/v2"
+echo "Pulsar Manager:         http://$SELECTED_IP:9527"
+echo "Pulsar Service URL:     pulsar://$SELECTED_IP:6650"
 echo ""
 echo "Default Pulsar Manager credentials:"
-echo "Username: pulsar"
-echo "Password: pulsar"
+echo "Username: admin"
+echo "Password: admin123"
 
 echo ""
 echo "🎉 Apache Pulsar services started successfully!"
 echo ""
-echo "To stop the services, run:"
-echo "  $DOCKER_COMPOSE_CMD down"
+echo "Configuration Details:"
+echo "======================"
+echo "Selected IP: $SELECTED_IP"
+echo "IP Type: $([ "$USE_PUBLIC_IP" = "true" ] && echo "Public" || echo "Private")"
+echo "Data Directory Permissions: 777 (full access)"
 echo ""
-echo "To view logs for a specific service, run:"
-echo "  docker logs <service-name> -f"
-echo "  Example: docker logs broker -f"
+echo "Management Commands:"
+echo "==================="
+echo "Stop services:     $DOCKER_COMPOSE_CMD down"
+echo "View logs:         docker logs <service-name> -f"
+echo "Check status:      $DOCKER_COMPOSE_CMD ps"
+echo "Restart services:  bash run-service.sh"
 echo ""
-echo "To check service status:"
-echo "  $DOCKER_COMPOSE_CMD ps"
+echo "To manually configure IP, edit .env file and set:"
+echo "PULSAR_BROKER_IP=<your-desired-ip>"
+echo "USE_PUBLIC_IP=true|false"
