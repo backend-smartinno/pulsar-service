@@ -28,6 +28,7 @@ services:
     healthcheck:
       test: ["CMD", "bin/pulsar-zookeeper-ruok.sh"]
       interval: 10s
+      start_period: 180s
       timeout: 5s
       retries: 30
     logging:
