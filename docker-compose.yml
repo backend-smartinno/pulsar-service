@@ -120,6 +120,11 @@ services:
       
       # Slightly bumped up memory for stability
       - PULSAR_MEM=-Xms512m -Xmx512m -XX:MaxDirectMemorySize=256m
+
+      # Enables the pulsar_health Prometheus metric (0/1 instead of the
+      # permanently-disabled default -1) — confirmed via Pulsar's own
+      # PIP-271 docs that this metric reports -1 until this is set.
+      - healthCheckMetricsUpdateTimeInSeconds=60
     depends_on:
       zookeeper:
         condition: service_healthy
